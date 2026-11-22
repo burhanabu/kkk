@@ -79,14 +79,31 @@ def extra(dev):
     return None
 
 
+def alternatives(dev):
+    """The same sound device on the other Windows audio APIs. Used if the first way in is busy."""
+    name, found = sd.query_devices(dev)["name"], [dev]
+    for i, d in enumerate(sd.query_devices()):
+        if i != dev and d["max_output_channels"] > 0 and (
+                d["name"].startswith(name[:25]) or name.startswith(d["name"][:25])):
+            found.append(i)
+    return found
+
+
 class Out:
     """An output stream that stays open and plays whatever is put in its buffer.
     Starting a clip just adds it to the buffer, so there is no waiting and no stutter."""
     def __init__(self, dev, sr):
         self.buf, self.cur, self.pos = collections.deque(), None, 0
-        self.stream = sd.OutputStream(samplerate=sr, device=dev, channels=1, dtype="float32",
-                                      latency="low", extra_settings=extra(dev), callback=self.cb)
-        self.stream.start()
+        last = None
+        for cand in alternatives(dev):
+            try:
+                self.stream = sd.OutputStream(samplerate=sr, device=cand, channels=1, dtype="float32",
+                                              latency="low", extra_settings=extra(cand), callback=self.cb)
+                self.stream.start()
+                return
+            except Exception as e:
+                last = e
+        raise last
 
     def cb(self, out, frames, t, status):
         i = 0
@@ -117,15 +134,17 @@ def play(samples, sr, gen):
     if gen != S["gen"]:
         return
     x = np.ascontiguousarray(samples, dtype=np.float32)
-    try:
-        for d in targets:
+    if S["err"].startswith("Audio output"):
+        S["err"] = ""
+    for d in targets:  # a problem with one device must not stop the other
+        try:
             o = out_streams.get((d, sr))
             if o is None:
                 o = out_streams[(d, sr)] = Out(d, sr)
             o.buf.append(x)  # starts at once, does not wait for the audio to finish
-    except Exception as e:
-        out_streams.clear()
-        S["err"] = "Audio output: %s" % e
+        except Exception as e:
+            out_streams.pop((d, sr), None)
+            S["err"] = "Audio output (%s): %s" % ("virtual cable" if d == cfg["cable"] else "hear-myself", e)
 
 
 def busy_check(text, secs):
