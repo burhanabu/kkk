@@ -44,6 +44,8 @@ S = {"call": False, "ready": False, "gen": 0, "heard": [], "prepared": 0, "total
 engine = None
 text_q, audio_q = queue.Queue(), queue.Queue()
 out_streams, mic = {}, {"s": None}
+playing, queue_end = {}, {"t": 0.0}  # playing: when each line finishes; queue_end: when the audio queue empties
+prep_lock = threading.Lock()
 clips, pending, busy = {}, set(), {}  # clips: finished audio per button text; pending: lines queued or playing
 seg = core.Segmenter(cfg["silence"])
 
@@ -94,6 +96,7 @@ class Out:
     Starting a clip just adds it to the buffer, so there is no waiting and no stutter."""
     def __init__(self, dev, sr):
         self.buf, self.cur, self.pos = collections.deque(), None, 0
+        self.level = 0.0  # loudness of what is being played, for the on-screen meter
         last = None
         for cand in alternatives(dev):
             try:
@@ -120,19 +123,31 @@ class Out:
         except IndexError:
             pass
         out[i:] = 0
+        m = float(np.abs(out).max())
+        self.level = m if m > self.level else self.level * 0.8
 
     def clear(self):
         self.buf.clear()
         self.cur = None
 
 
-def play(samples, sr, gen):
+def mark(text, secs):
+    """Remember when this line will finish, so its button can stay lit until then."""
+    now = time.time()
+    start = max(now, queue_end["t"])  # a line queued behind another starts when that one ends
+    queue_end["t"] = start + secs
+    if text is not None:
+        playing[text] = start + secs
+
+
+def play(samples, sr, gen, text=None):
     targets = [d for d in (cfg["cable"], cfg["monitor"]) if d is not None]
     if not targets:
         S["err"] = "Choose the virtual cable in settings first."
         return
     if gen != S["gen"]:
         return
+    mark(text, len(samples) / sr)
     x = np.ascontiguousarray(samples, dtype=np.float32)
     if S["err"].startswith("Audio output"):
         S["err"] = ""
@@ -176,8 +191,14 @@ def clip_of(text):
 def say_text(text, gen):
     c = clips.get((text, cfg["voice"], cfg["speed"]))
     if c is not None:  # prepared button: one finished clip, plays at once
-        play(c[0], c[1], gen)
+        play(c[0], c[1], gen, text)
         return
+    if S.get("want") == text:  # still being voiced in the background: wait for it, do not repeat the work
+        with prep_lock:
+            c = clips.get((text, cfg["voice"], cfg["speed"]))
+        if c is not None:
+            play(c[0], c[1], gen, text)
+            return
     for p in pieces(text):
         if gen != S["gen"]:
             return
@@ -266,6 +287,8 @@ def enqueue(text):
 def stop():
     S["gen"] += 1
     busy.clear()
+    playing.clear()
+    queue_end["t"] = 0.0
     for o in list(out_streams.values()):
         o.clear()
     while not text_q.empty():
@@ -289,7 +312,16 @@ def state():
     ins, outs = devices()
     return {"cfg": cfg, "ins": ins, "outs": outs, "voices": engine.voices if engine else [],
             "cable_found": any("CABLE" in d["name"] for d in outs), "call": S["call"], "ready": S["ready"], "heard": S["heard"], "err": S["err"],
-            "prepared": S["prepared"], "total": S["total"], "disclosure": disclosure()}
+            "prepared": S["prepared"], "total": S["total"], "disclosure": disclosure(),
+            "playing": {str(i): round(l, 2) for i, b in enumerate(cfg["buttons"])
+                        for l in [playing.get(b["text"], 0) - time.time()] if l > 0}}
+
+
+@app.get("/api/level")
+def level():
+    outs = [o for (d, _), o in list(out_streams.items()) if d == cfg["cable"]]
+    return {"level": max([o.level for o in outs], default=0.0),
+            "speaking": any(o.cur is not None or len(o.buf) > 0 for o in outs)}
 
 
 @app.post("/api/config")
@@ -335,17 +367,16 @@ def say(body: dict = Body(...)):
 @app.post("/api/button")
 def button(body: dict = Body(...)):
     i = int(body.get("i", -1))
+    left = 0.0
     if S["call"] and 0 <= i < len(cfg["buttons"]):
         t = cfg["buttons"][i]["text"]
         c = clips.get((t, cfg["voice"], cfg["speed"]))
         if c is None:
             enqueue(t)
         elif not busy_check(t, len(c[0]) / c[1] + 0.3):
-            play(c[0], c[1], S["gen"])  # already made: plays immediately
-    return {"ok": S["call"]}
-
-
-prep_lock = threading.Lock()
+            play(c[0], c[1], S["gen"], t)  # already made: plays immediately
+        left = max(0.0, playing.get(t, 0) - time.time())
+    return {"ok": S["call"], "left": left}
 
 
 @app.post("/api/prepare")
