@@ -25,6 +25,13 @@ main{display:grid;grid-template-columns:1fr 310px;gap:24px;margin-top:20px}
 .key b{font-size:16px;font-weight:600}
 .key small{display:flex;justify-content:space-between;color:#4a5d6a;font-size:12px}
 .key.off{opacity:.45}
+.vu{display:flex;align-items:center;gap:10px;padding:6px 14px;border-radius:999px;background:#16212a;border:1px solid var(--line);color:var(--mute);font-size:13px}
+.vu.on{border-color:var(--air);background:#3a2a0c;color:var(--ink)}
+.bars{display:flex;gap:3px;align-items:flex-end;height:22px}
+.bars i{width:5px;background:var(--line);border-radius:2px}
+.bars i.l{background:var(--air)}
+.key.play{background:#ffb020;border-bottom-color:#b97a00;color:#241600}
+.key.play small{color:#5a3a00}
 .say{display:flex;gap:8px;margin-top:18px}
 .say input{flex:1}
 input,select,textarea{width:100%;background:#16212a;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:9px 10px;font:inherit}
@@ -39,13 +46,13 @@ textarea{resize:vertical}
 <body><div class="app">
 <header>
   <div><h1>AccentLive Pro</h1><p id="st">Starting engine…</p></div>
-  <div class="call"><span id="air" class="air"></span><button id="callbtn" class="go">Start call</button></div>
+  <div class="call"><div class="vu" id="vu"><span id="vul">Silent</span><div class="bars" id="bars"></div></div><span id="air" class="air"></span><button id="callbtn" class="go">Start call</button></div>
 </header>
 <main>
   <section>
     <button id="inst" class="go" hidden>Install virtual microphone (one click)</button>
     <div id="keys" class="keys"></div>
-    <div class="say"><input id="txt" placeholder="Type a line and press Enter" autocomplete="off"><button id="addb" title="Save this line as a new button">+ Button</button><button id="stop">Stop</button></div>
+    <div class="say"><input id="txt" placeholder="Type a line and press Enter" autocomplete="off"><button id="send" class="go">Send</button><button id="addb" title="Save this line as a new button">+ Button</button><button id="stop">Stop</button></div>
     <div id="heard" class="heard"></div>
   </section>
   <aside>
@@ -63,7 +70,7 @@ textarea{resize:vertical}
   </aside>
 </main></div>
 <script>
-const $=i=>document.getElementById(i);let S=null,first=true,flash="",flashT=0;
+const $=i=>document.getElementById(i);let S=null,first=true,flash="",flashT=0,until={};
 const post=(u,b)=>fetch(u,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(b||{})}).then(r=>r.json());
 function fill(el,list,sel,none){el.replaceChildren();if(none){const o=document.createElement("option");o.value="";o.textContent=none;el.append(o)}
  for(const d of list){const o=document.createElement("option");o.value=d.id??d;o.textContent=d.name??d;if(String(o.value)===String(sel))o.selected=true;el.append(o)}}
@@ -78,10 +85,11 @@ function keys(){const k=$("keys");k.replaceChildren();S.cfg.buttons.forEach((b,i
  e.className="key"+(S.call?"":" off");const l=document.createElement("b");l.textContent=b.label;const s=document.createElement("small");
  const t=document.createElement("span");t.textContent=b.text.length>26?b.text.slice(0,25)+"…":b.text;const n=document.createElement("span");n.textContent=i<9?i+1:"";
  s.append(t,n);e.append(l,s);e.onclick=()=>press(i);k.append(e)})}
-const hold={};const press=i=>{if(!(S&&S.call)||hold[i])return;hold[i]=1;setTimeout(()=>hold[i]=0,500);post("/api/button",{i})};
+const hold={};const press=async i=>{if(!(S&&S.call)||hold[i])return;hold[i]=1;setTimeout(()=>hold[i]=0,500);const r=await post("/api/button",{i});if(r.left>0)until[i]=performance.now()+r.left*1000};
 async function load(){try{S=await (await fetch("/api/state")).json()}catch(e){$("st").textContent="Engine is not running";$("st").className="bad";return}
  if(first&&S.voices.length){form();first=false}
  if(!S.cfg)return;
+ until={};for(const [i,l] of Object.entries(S.playing||{}))until[i]=performance.now()+l*1000;
  const st=$("st");const fl=Date.now()-flashT<7000?flash:"";st.className=(fl||S.err)?"bad":"";
  st.textContent=fl||S.err||(!S.cable_found?"Virtual microphone not installed. Click the Install button, allow the Windows prompt, then restart the PC.":!S.ready?"Loading voices… first start can take a few minutes":S.prepared<S.total?"Preparing buttons "+S.prepared+"/"+S.total:S.call?"On call. Buttons play instantly.":"Ready. Buttons are prepared.");
  $("inst").hidden=S.cable_found;$("air").className="air"+(S.call?" on":"");const cb=$("callbtn");cb.textContent=S.call?"End call":"Start call";cb.className="go"+(S.call?" end":"");
@@ -94,13 +102,21 @@ const save=async()=>{await post("/api/config",{name:$("name").value.trim(),compa
 $("save").onclick=save;
 ["name","company","voice","speed","cable","monitor","mic","live","btns"].forEach(i=>$(i).addEventListener("change",save));
 $("speed").oninput=e=>$("spv").textContent=e.target.value+"x";
-$("txt").onkeydown=e=>{if(e.key==="Enter"&&e.target.value.trim()){post("/api/say",{text:e.target.value});e.target.value=""}};
+const send=()=>{const t=$("txt").value.trim();if(t){post("/api/say",{text:t});$("txt").value=""}};
+$("txt").onkeydown=e=>{if(e.key==="Enter")send()};
+$("send").onclick=send;
 $("inst").onclick=()=>{post("/api/install_cable");$("st").textContent="Installer is opening. Allow it, then restart the PC."};
-let tm;$("txt").oninput=e=>{clearTimeout(tm);tm=setTimeout(()=>{const t=e.target.value.trim();if(t)post("/api/prepare",{text:t})},350)};
+let tm;$("txt").oninput=e=>{clearTimeout(tm);tm=setTimeout(()=>{const t=e.target.value.trim();if(t)post("/api/prepare",{text:t})},120)};
 $("addb").onclick=async()=>{const t=$("txt").value.trim();if(!t||!S)return;const bs=S.cfg.buttons.concat([{label:t.slice(0,18),text:t}]).slice(0,30);
  await post("/api/config",{buttons:bs});S.cfg.buttons=bs;$("btns").value=lines(bs);$("txt").value="";keys()};
-$("stop").onclick=()=>post("/api/stop");
-document.onkeydown=e=>{if(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;if(e.key==="Escape")post("/api/stop");
+$("stop").onclick=()=>{until={};post("/api/stop")};
+document.onkeydown=e=>{if(/INPUT|TEXTAREA|SELECT/.test(e.target.tagName))return;if(e.key==="Escape"){until={};post("/api/stop")}
  else if(!e.repeat&&/^[1-9]$/.test(e.key))press(Number(e.key)-1)};
+const bars=$("bars");for(let k=0;k<10;k++){const i=document.createElement("i");i.style.height=(6+k*1.7)+"px";bars.append(i)}
+async function meter(){try{const r=await (await fetch("/api/level")).json();const n=Math.min(10,Math.round(r.level*14));
+ [...bars.children].forEach((b,k)=>b.classList.toggle("l",r.speaking&&k<Math.max(n,1)));
+ $("vu").classList.toggle("on",r.speaking);$("vul").textContent=r.speaking?"Customer is hearing you":"Silent"}catch(e){}}
+setInterval(meter,80);
 load();setInterval(load,1000);
+setInterval(()=>{const n=performance.now();document.querySelectorAll(".key").forEach((e,i)=>e.classList.toggle("play",(until[i]||0)>n))},80);
 </script></body></html>
